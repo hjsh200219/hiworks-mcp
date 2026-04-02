@@ -71,48 +71,7 @@ async function createSMTPTransporter(username: string, password: string) {
 // MCP 서버 설정
 const server = new McpServer({
   name: 'hiworks-mail-mcp',
-  version: '1.0.8',
-  capabilities: {
-    resources: {},
-    tools: {
-      read_username: {
-        description: '하이웍스 username을 읽어옵니다.',
-        parameters: {
-          type: 'object',
-          properties: {
-            username: { type: 'string' },
-            password: { type: 'string' }
-          },
-          required: ['username', 'password']
-        }
-      },
-      search_email: {
-        description: '하이웍스 이메일을 검색합니다.',
-        parameters: {
-          type: 'object',
-          properties: {
-            username: { type: 'string' },
-            password: { type: 'string' },
-            query: { type: 'string' },
-            limit: { type: 'number' }
-          },
-          required: ['username', 'password']
-        }
-      },
-      read_email: {
-        description: '하이웍스 이메일을 읽어옵니다.',
-        parameters: {
-          type: 'object',
-          properties: {
-            username: { type: 'string' },
-            password: { type: 'string' },
-            messageId: { type: 'string' }
-          },
-          required: ['username', 'password', 'messageId']
-        }
-      }
-    }
-  }
+  version: '1.0.12',
 });
 
 // 이메일 스키마
@@ -245,21 +204,24 @@ server.tool(
   async ({ username, password, messageId }) => {
     try {
       const client = await connectPOP3(username, password);
-      const stat = await client.STAT();
-      const totalMessages = stat[0];
+
+      // LIST로 실제 존재하는 메일 번호 목록 가져오기
+      const messageList = await client.LIST();
       let email: Email | undefined;
 
-      for (let i = totalMessages; i >= 1; i--) {
+      // 최신 메일부터 역순으로 순회
+      for (let idx = messageList.length - 1; idx >= 0; idx--) {
+        const msgNum = Number(messageList[idx][0]);
         try {
-          const rawEmail = await client.RETR(i);
+          const rawEmail = await client.RETR(msgNum);
           const parsed = await simpleParser(rawEmail);
-          
-          if (parsed.messageId === messageId || String(i) === messageId) {
+
+          if (parsed.messageId === messageId || String(msgNum) === messageId) {
             // KST로 변환된 날짜 사용
             const date = parsed.date ? formatDate(parsed.date) : formatDate(new Date());
-            
+
             email = {
-              id: parsed.messageId || String(i),
+              id: parsed.messageId || String(msgNum),
               subject: parsed.subject || '(제목 없음)',
               from: Array.isArray(parsed.from) ? parsed.from[0]?.text || '' : parsed.from?.text || '',
               to: Array.isArray(parsed.to) ? parsed.to[0]?.text || '' : parsed.to?.text || '',
@@ -270,12 +232,26 @@ server.tool(
             break;
           }
         } catch (err) {
-          log(`Error processing email ${i}:`, err);
+          log(`Error processing email ${msgNum}:`, err);
           continue;
         }
       }
 
       await client.QUIT();
+
+      if (!email) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                error: `메일을 찾을 수 없습니다: ${messageId}`
+              } as ReadEmailResponse)
+            }
+          ]
+        };
+      }
 
       return {
         content: [
